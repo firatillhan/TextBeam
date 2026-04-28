@@ -8,21 +8,24 @@
 import UIKit
 import CoreBluetooth
 
-
+private enum ConnectionState {
+    case connected, scanning, bluetoothOff
+}
 
 class BluetoothViewController: UIViewController {
 
-
-
     // MARK: - Properties
-    var centralManager: CBCentralManager!
-    var connectedPeripheral: CBPeripheral?
-    var writeCharacteristic: CBCharacteristic?
+    private var centralManager: CBCentralManager!
+    private var connectedPeripheral: CBPeripheral?
+    private var writeCharacteristic: CBCharacteristic?
+
+    private let HM10_SERVICE_UUID = CBUUID(string: "FFE0")
+    private let HM10_CHARACTERISTIC_UUID = CBUUID(string: "FFE1")
+    private let maxCharacters = 14
+    private let maxLines = 6
+    private var lines: [String] = []
 
     // MARK: - UI Elements
-    private let scrollView = UIScrollView()
-    private let contentView = UIView()
-
     private let titleLabel: UILabel = {
         let label = UILabel()
         label.text = "Bluetooth Kontrolcü"
@@ -42,6 +45,7 @@ class BluetoothViewController: UIViewController {
         let view = UIView()
         view.backgroundColor = UIColor(red: 0.19, green: 0.82, blue: 0.35, alpha: 1)
         view.layer.cornerRadius = 4
+        view.alpha = 0.5
         return view
     }()
 
@@ -50,6 +54,7 @@ class BluetoothViewController: UIViewController {
         label.text = "Bağlanıyor..."
         label.font = .systemFont(ofSize: 13)
         label.textColor = UIColor(red: 0.19, green: 0.82, blue: 0.35, alpha: 1)
+        label.alpha = 0.5
         return label
     }()
 
@@ -65,7 +70,6 @@ class BluetoothViewController: UIViewController {
         label.text = "NOKIA 5110"
         label.font = .systemFont(ofSize: 11, weight: .semibold)
         label.textColor = UIColor(white: 0.55, alpha: 1)
-        label.letterSpacing(0.5)
         return label
     }()
 
@@ -85,15 +89,15 @@ class BluetoothViewController: UIViewController {
         return view
     }()
 
-    private let lcdTextLabel: UILabel = {
-        let label = UILabel()
-        label.text = "BEKLIYOR..."
-        label.font = UIFont(name: "Courier-Bold", size: 14) ?? .monospacedSystemFont(ofSize: 14, weight: .bold)
-        label.textColor = UIColor(red: 0.1, green: 0.23, blue: 0.36, alpha: 1)
-        label.textAlignment = .center
-        label.adjustsFontSizeToFitWidth = true
-        label.minimumScaleFactor = 0.5
-        return label
+    // 6 satır için 6 ayrı label
+    private var lcdLineLabels: [UILabel] = {
+        return (0..<6).map { _ in
+            let label = UILabel()
+            label.font = UIFont(name: "Courier-Bold", size: 30) ?? .monospacedSystemFont(ofSize: 30, weight: .bold)
+            label.textColor = UIColor(red: 0.1, green: 0.23, blue: 0.36, alpha: 1)
+            label.textAlignment = .center
+            return label
+        }
     }()
 
     private let inputCard: UIView = {
@@ -116,7 +120,7 @@ class BluetoothViewController: UIViewController {
         tf.backgroundColor = UIColor(white: 0.17, alpha: 1)
         tf.layer.cornerRadius = 12
         tf.textColor = .white
-        tf.font = UIFont(name: "Courier", size: 14) ?? .monospacedSystemFont(ofSize: 14, weight: .regular)
+        tf.font = UIFont(name: "Courier-Bold", size: 20) ?? .monospacedSystemFont(ofSize: 20, weight: .bold)
         tf.attributedPlaceholder = NSAttributedString(
             string: "Komut yaz...",
             attributes: [.foregroundColor: UIColor(white: 0.28, alpha: 1)]
@@ -149,62 +153,64 @@ class BluetoothViewController: UIViewController {
         setupConstraints()
         setupActions()
         centralManager = CBCentralManager(delegate: self, queue: nil)
+
+        let tap = UITapGestureRecognizer(target: self, action: #selector(dismissKeyboard))
+        view.addGestureRecognizer(tap)
+
+        // Başlangıç metni — Arduino ile aynı
+        lcdLineLabels[0].text = "Waiting text.."
     }
 
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        let screenHeight = lcdScreenView.bounds.height
+        let screenWidth = lcdScreenView.bounds.width
+        guard screenHeight > 0 else { return }
+        let lineHeight = screenHeight / 6
+        for (i, label) in lcdLineLabels.enumerated() {
+            label.frame = CGRect(
+                x: 0,
+                y: CGFloat(i) * lineHeight,
+                width: screenWidth,
+                height: lineHeight
+            )
+        }
+    }
+    
     // MARK: - Setup
     private func setupUI() {
-        view.addSubview(scrollView)
-        scrollView.addSubview(contentView)
-
         [titleLabel, connectionBadge, lcdContainerCard, inputCard].forEach {
-            contentView.addSubview($0)
+            view.addSubview($0)
         }
-
         connectionBadge.addSubview(connectionDot)
         connectionBadge.addSubview(connectionLabel)
-
         lcdContainerCard.addSubview(lcdSectionLabel)
         lcdContainerCard.addSubview(lcdOuterView)
         lcdOuterView.addSubview(lcdScreenView)
-        lcdScreenView.addSubview(lcdTextLabel)
-
+        lcdLineLabels.forEach { lcdScreenView.addSubview($0) }
         inputCard.addSubview(inputSectionLabel)
         inputCard.addSubview(messageTextField)
         inputCard.addSubview(sendButton)
     }
 
     private func setupConstraints() {
-        [scrollView, contentView, titleLabel, connectionBadge, connectionDot,
-         connectionLabel, lcdContainerCard, lcdSectionLabel, lcdOuterView,
-         lcdScreenView, lcdTextLabel, inputCard, inputSectionLabel,
-         messageTextField, sendButton].forEach {
+        [titleLabel, connectionBadge, connectionDot, connectionLabel,
+         lcdContainerCard, lcdSectionLabel, lcdOuterView, lcdScreenView,
+         inputCard, inputSectionLabel, messageTextField, sendButton].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
         }
 
         let padding: CGFloat = 20
-        // 84:48 oranı → ekran genişliği - 2*padding - 2*cardPadding = net lcd genişliği
         let lcdWidth = UIScreen.main.bounds.width - (padding * 2) - 32
         let lcdHeight = lcdWidth * (48.0 / 84.0)
+        let lineHeight = lcdHeight / 6 // ekran iç alanını 6'ya böl
 
         NSLayoutConstraint.activate([
-            scrollView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
-            scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            titleLabel.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 16),
+            titleLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: padding),
 
-            contentView.topAnchor.constraint(equalTo: scrollView.topAnchor),
-            contentView.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor),
-            contentView.trailingAnchor.constraint(equalTo: scrollView.trailingAnchor),
-            contentView.bottomAnchor.constraint(equalTo: scrollView.bottomAnchor),
-            contentView.widthAnchor.constraint(equalTo: scrollView.widthAnchor),
-
-            // Title
-            titleLabel.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 16),
-            titleLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: padding),
-
-            // Badge
             connectionBadge.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 8),
-            connectionBadge.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: padding),
+            connectionBadge.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: padding),
             connectionBadge.heightAnchor.constraint(equalToConstant: 28),
 
             connectionDot.centerYAnchor.constraint(equalTo: connectionBadge.centerYAnchor),
@@ -216,10 +222,9 @@ class BluetoothViewController: UIViewController {
             connectionLabel.leadingAnchor.constraint(equalTo: connectionDot.trailingAnchor, constant: 6),
             connectionLabel.trailingAnchor.constraint(equalTo: connectionBadge.trailingAnchor, constant: -10),
 
-            // LCD Card
             lcdContainerCard.topAnchor.constraint(equalTo: connectionBadge.bottomAnchor, constant: 20),
-            lcdContainerCard.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: padding),
-            lcdContainerCard.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -padding),
+            lcdContainerCard.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: padding),
+            lcdContainerCard.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -padding),
 
             lcdSectionLabel.topAnchor.constraint(equalTo: lcdContainerCard.topAnchor, constant: 16),
             lcdSectionLabel.leadingAnchor.constraint(equalTo: lcdContainerCard.leadingAnchor, constant: 16),
@@ -235,16 +240,9 @@ class BluetoothViewController: UIViewController {
             lcdScreenView.trailingAnchor.constraint(equalTo: lcdOuterView.trailingAnchor, constant: -8),
             lcdScreenView.bottomAnchor.constraint(equalTo: lcdOuterView.bottomAnchor, constant: -8),
 
-            lcdTextLabel.centerXAnchor.constraint(equalTo: lcdScreenView.centerXAnchor),
-            lcdTextLabel.centerYAnchor.constraint(equalTo: lcdScreenView.centerYAnchor),
-            lcdTextLabel.leadingAnchor.constraint(equalTo: lcdScreenView.leadingAnchor, constant: 8),
-            lcdTextLabel.trailingAnchor.constraint(equalTo: lcdScreenView.trailingAnchor, constant: -8),
-
-            // Input Card
             inputCard.topAnchor.constraint(equalTo: lcdContainerCard.bottomAnchor, constant: 14),
-            inputCard.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: padding),
-            inputCard.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -padding),
-            inputCard.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -20),
+            inputCard.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: padding),
+            inputCard.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -padding),
 
             inputSectionLabel.topAnchor.constraint(equalTo: inputCard.topAnchor, constant: 16),
             inputSectionLabel.leadingAnchor.constraint(equalTo: inputCard.leadingAnchor, constant: 16),
@@ -260,6 +258,7 @@ class BluetoothViewController: UIViewController {
             sendButton.widthAnchor.constraint(equalToConstant: 44),
             sendButton.heightAnchor.constraint(equalToConstant: 44),
         ])
+
     }
 
     private func setupActions() {
@@ -267,40 +266,65 @@ class BluetoothViewController: UIViewController {
         messageTextField.delegate = self
     }
 
+    // MARK: - LCD Güncelleme
+    private func updateLCDDisplay(with text: String) {
+        if lines.count < maxLines {
+            lines.append(text)
+        } else {
+            lines.removeFirst()
+            lines.append(text)
+        }
+        // Label'ları güncelle
+        for (i, label) in lcdLineLabels.enumerated() {
+            label.text = i < lines.count ? lines[i] : ""
+        }
+    }
+
     // MARK: - Actions
+    @objc private func dismissKeyboard() {
+        view.endEditing(true)
+    }
+
     @objc private func sendMessage() {
         guard let text = messageTextField.text, !text.isEmpty else { return }
-        let uppercased = text.uppercased()
-        lcdTextLabel.text = uppercased
-        sendViaBluetooth(text: uppercased)
+        let trimmed = String(text.prefix(maxCharacters))
+        updateLCDDisplay(with: trimmed)
+        sendData(trimmed + "\n")
         messageTextField.text = ""
     }
 
-    private func sendViaBluetooth(text: String) {
+    private func sendData(_ text: String) {
         guard let peripheral = connectedPeripheral,
               let characteristic = writeCharacteristic,
-              let data = text.data(using: .utf8) else { return }
-        peripheral.writeValue(data, for: characteristic, type: .withResponse)
-    }
-
-    private func updateConnectionStatus(connected: Bool) {
-        DispatchQueue.main.async {
-            self.connectionLabel.text = connected ? "Bağlandı" : "Bağlanıyor..."
-            let alpha: CGFloat = connected ? 1.0 : 0.5
-            self.connectionDot.alpha = alpha
-            self.connectionLabel.alpha = alpha
+              let data = text.data(using: .utf8) else {
+            print("Hata: Bluetooth bağlantısı hazır değil.")
+            return
         }
+        peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
+        print("Gönderildi: \(text)")
     }
-}
 
-// MARK: - UITextField Extension (letter spacing)
-extension UILabel {
-    func letterSpacing(_ spacing: CGFloat) {
-        guard let text = self.text else { return }
-        let attributed = NSAttributedString(string: text, attributes: [.kern: spacing])
-        self.attributedText = attributed
-    }
-}
+    private func updateConnectionStatus(_ state: ConnectionState) {
+        DispatchQueue.main.async {
+            switch state {
+            case .connected:
+                self.connectionLabel.text = "Bağlandı"
+                self.connectionDot.backgroundColor = UIColor(red: 0.19, green: 0.82, blue: 0.35, alpha: 1)
+                self.connectionDot.alpha = 1.0
+                self.connectionLabel.alpha = 1.0
+            case .scanning:
+                self.connectionLabel.text = "Bağlanıyor..."
+                self.connectionDot.backgroundColor = UIColor(red: 1.0, green: 0.62, blue: 0.04, alpha: 1)
+                self.connectionDot.alpha = 1.0
+                self.connectionLabel.alpha = 1.0
+            case .bluetoothOff:
+                self.connectionLabel.text = "Bağlantı Yok"
+                self.connectionDot.backgroundColor = UIColor(red: 0.9, green: 0.27, blue: 0.27, alpha: 1)
+                self.connectionDot.alpha = 1.0
+                self.connectionLabel.alpha = 0.4
+            }
+        }
+    }}
 
 // MARK: - UITextFieldDelegate
 extension BluetoothViewController: UITextFieldDelegate {
@@ -308,46 +332,64 @@ extension BluetoothViewController: UITextFieldDelegate {
         sendMessage()
         return true
     }
+
+    func textField(_ textField: UITextField, shouldChangeCharactersIn range: NSRange,
+                   replacementString string: String) -> Bool {
+        let current = textField.text ?? ""
+        let newLength = current.count + string.count - range.length
+        return newLength <= maxCharacters
+    }
 }
 
 // MARK: - CBCentralManagerDelegate
 extension BluetoothViewController: CBCentralManagerDelegate {
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
-        if central.state == .poweredOn {
-            central.scanForPeripherals(withServices: nil, options: nil)
+        switch central.state {
+        case .poweredOn:
+            centralManager.scanForPeripherals(withServices: [HM10_SERVICE_UUID], options: nil)
+            updateConnectionStatus(.scanning)
+
+        case .poweredOff:
+            updateConnectionStatus(.bluetoothOff)
+        default:
+            break
         }
     }
 
     func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral,
                         advertisementData: [String: Any], rssi RSSI: NSNumber) {
-        guard let name = peripheral.name, name.contains("HC-06") || name.contains("HC-05") else { return }
         connectedPeripheral = peripheral
-        central.stopScan()
-        central.connect(peripheral, options: nil)
+        connectedPeripheral?.delegate = self
+        centralManager.stopScan()
+        centralManager.connect(peripheral, options: nil)
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
-        peripheral.delegate = self
-        peripheral.discoverServices(nil)
-        updateConnectionStatus(connected: true)
+        peripheral.discoverServices([HM10_SERVICE_UUID])
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
-        updateConnectionStatus(connected: false)
-        centralManager.scanForPeripherals(withServices: nil, options: nil)
+        updateConnectionStatus(.bluetoothOff)
+        centralManager.scanForPeripherals(withServices: [HM10_SERVICE_UUID], options: nil)
     }
 }
 
 // MARK: - CBPeripheralDelegate
 extension BluetoothViewController: CBPeripheralDelegate {
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
-        peripheral.services?.forEach { peripheral.discoverCharacteristics(nil, for: $0) }
+        guard let services = peripheral.services else { return }
+        for service in services {
+            peripheral.discoverCharacteristics([HM10_CHARACTERISTIC_UUID], for: service)
+        }
     }
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
-        service.characteristics?.forEach { characteristic in
-            if characteristic.properties.contains(.write) || characteristic.properties.contains(.writeWithoutResponse) {
+        guard let characteristics = service.characteristics else { return }
+        for characteristic in characteristics {
+            if characteristic.uuid == HM10_CHARACTERISTIC_UUID {
                 writeCharacteristic = characteristic
+                updateConnectionStatus(.connected)
+                return
             }
         }
     }
